@@ -15,6 +15,9 @@ from .dataio import DataBundle, FeatureData
 _LOGGER = logging.getLogger(__name__)
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 @dataclass
 class AlignmentResult:
     source: FeatureData
@@ -162,6 +165,141 @@ def _apply_preprocess(
         df_out[col] = (df_out[col] - mean_val) / std_val
         applied[col] = {"mean": mean_val, "std": std_val}
     return df_out, applied
+
+def _safe_float(value: object) -> Optional[float]:
+    """Convert ``value`` to ``float`` if possible, otherwise return ``None``."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+
+    candidate: object = value
+    if isinstance(candidate, str):
+        candidate = candidate.strip()
+        if not candidate:
+            return None
+
+    try:
+        return float(candidate)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
+        result = series.iloc[0]
+        if pd.isna(result):
+            return None
+        return float(result)
+
+
+def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[float, float]]:
+    """从预处理配置中提取均值与标准差，兼容多种导出格式。"""
+
+    stats: Dict[str, Tuple[float, float]] = {}
+
+    if not isinstance(params, dict):
+        return stats
+
+    def update_from_mapping(mean_map: Dict[str, object], std_map: Dict[str, object]) -> None:
+        common = set(mean_map).intersection(std_map)
+        for key in common:
+            mean_val = _safe_float(mean_map.get(key))
+            std_val = _safe_float(std_map.get(key))
+            if mean_val is None or std_val is None:
+                continue
+            stats[str(key)] = (mean_val, std_val)
+
+    def update_from_lists(columns: List[object], means: List[object], stds: List[object]) -> None:
+        if not (len(columns) == len(means) == len(stds)):
+            return
+        for col, mean, std in zip(columns, means, stds):
+            mean_val = _safe_float(mean)
+            std_val = _safe_float(std)
+            if col is None or mean_val is None or std_val is None:
+                continue
+            stats[str(col)] = (mean_val, std_val)
+
+    def recurse(node: Dict[str, object]) -> None:
+        if not isinstance(node, dict):
+            return
+
+        feature_stats = node.get("feature_stats")
+        if isinstance(feature_stats, dict):
+            for col, val in feature_stats.items():
+                if not isinstance(val, dict):
+                    continue
+                mean_val = _safe_float(val.get("mean") or val.get("mu") or val.get("avg") or val.get("mean_"))
+                std_val = _safe_float(val.get("std") or val.get("sigma") or val.get("std_") or val.get("scale"))
+                if mean_val is None or std_val is None:
+                    continue
+                stats[str(col)] = (mean_val, std_val)
+
+        mean_map = None
+        std_map = None
+        for key in ("mean", "means", "mean_dict"):
+            if isinstance(node.get(key), dict):
+                mean_map = node[key]  # type: ignore[assignment]
+                break
+        for key in ("std", "stds", "std_dict", "scale", "scale_dict"):
+            if isinstance(node.get(key), dict):
+                std_map = node[key]  # type: ignore[assignment]
+                break
+        if isinstance(mean_map, dict) and isinstance(std_map, dict):
+            update_from_mapping(mean_map, std_map)
+
+        columns = None
+        for key in ("feature_names", "columns", "feature_columns", "fields"):
+            if isinstance(node.get(key), list):
+                columns = node[key]  # type: ignore[assignment]
+                break
+        means = None
+        for key in ("mean_", "means", "mean_values", "mean_list"):
+            if isinstance(node.get(key), list):
+                means = node[key]  # type: ignore[assignment]
+                break
+        stds = None
+        for key in ("scale_", "scales", "std_", "std_values", "std_list"):
+            if isinstance(node.get(key), list):
+                stds = node[key]  # type: ignore[assignment]
+                break
+        if columns is not None and means is not None and stds is not None:
+            update_from_lists(columns, means, stds)
+
+        for child_key in ("scaler", "standard_scaler", "zscore", "preprocess", "normalizer"):
+            child = node.get(child_key)
+            if isinstance(child, dict):
+                recurse(child)
+
+        steps = node.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if isinstance(step, dict):
+                    recurse(step.get("params") or step)
+
+    recurse(params)
+    return stats
+
+
+def _apply_preprocess(
+    df: pd.DataFrame, stats: Dict[str, Tuple[float, float]]
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
+    if not stats:
+        return df.copy(), {}
+
+    df_out = df.copy()
+    applied: Dict[str, Dict[str, float]] = {}
+    for col, (mean, std) in stats.items():
+        if col not in df_out.columns:
+            continue
+        mean_val = _safe_float(mean)
+        std_val = _safe_float(std)
+        if mean_val is None or std_val is None:
+            continue
+        if abs(std_val) < 1e-12:
+            std_val = 1.0
+        df_out[col] = (df_out[col] - mean_val) / std_val
+        applied[col] = {"mean": mean_val, "std": std_val}
+    return df_out, applied
+
 
 def _compute_stats(Xs: np.ndarray, Xt: np.ndarray) -> Dict[str, float]:
     mean_diff = np.linalg.norm(Xs.mean(axis=0) - Xt.mean(axis=0))
