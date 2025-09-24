@@ -49,6 +49,10 @@ def save_all(
     preds.file_df.to_csv(file_path, index=False)
     exported.append(str(file_path))
 
+    submission_path = out_dir / "predictions_target_fault_type.csv"
+    preds.submission_df.to_csv(submission_path, index=False)
+    exported.append(str(submission_path))
+
     uncertain_path = out_dir / "uncertain_cases.csv"
     preds.uncertain_df.to_csv(uncertain_path, index=False)
     exported.append(str(uncertain_path))
@@ -119,6 +123,9 @@ def _write_html_report(
     lines.append(f"<p>生成时间：{pd.Timestamp.now():%Y-%m-%d %H:%M:%S}</p>")
     lines.append("<table border='0'>")
     lines.append(preds.file_df.head(20).to_html(index=False, border=0, justify="center"))
+    if not preds.submission_df.empty:
+        lines.append("<h2>目标文件预测结果</h2>")
+        lines.append(preds.submission_df.to_html(index=False, border=0, justify="center"))
     lines.append("</table>")
 
     lines.append("<h2>图表</h2><ul>")
