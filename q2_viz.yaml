@@ -1,0 +1,36 @@
+# Q2 可视化配置示例
+io:
+  model_path: "artifacts/q2/best_model.joblib"
+  columns_json: "artifacts/q2/columns.json"
+  split_manifest: "artifacts/q2/split_manifest.json"
+  features_csv: "artifacts/q1/数据集/source_domain_features_simplified.csv"
+  cv_results: "artifacts/q2/cv_results.csv"
+  out_dir: "artifacts/q2/viz"
+  log_file: "artifacts/q2/viz.log"
+
+classes:
+  order: ["N", "OR", "IR", "B"]
+  display:
+    N: "正常"
+    OR: "外圈故障"
+    IR: "内圈故障"
+    B: "滚动体故障"
+
+plots:
+  plot_confusion: true
+  plot_roc_pr: true
+  plot_feature_importance: true
+  plot_model_comparison: true
+  plot_reliability: true
+
+table_format:
+  precision: 3
+  highlight_lower: 0.8
+  highlight_upper: 0.9
+  highlight_low_color: "#ffe0e0"
+  highlight_high_color: "#e0ffe0"
+
+feature_importance:
+  topk: 30
+  permutation_repeats: 10
+  use_permutation: true
