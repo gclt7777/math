@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,9 @@ import pandas as pd  # pyright: ignore[reportMissingImports]
 
 from .config import Q3Config
 from .dataio import DataBundle, FeatureData
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -255,7 +259,11 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
     Xt_before = tgt_processed.to_numpy(dtype=float)
     Xt = Xt_before.copy()
 
-    metrics_before = _compute_stats(Xs, Xt)
+    metrics_before: Dict[str, float] = {}
+    try:
+        metrics_before = _compute_stats(Xs, Xt)
+    except Exception as exc:  # pragma: no cover - diagnostic fallback
+        _LOGGER.warning("failed to compute metrics before adaptation: %s", exc, exc_info=True)
     transform_params: Dict[str, object] = {"method": cfg.adapt.method, "preprocess": preprocess_summary}
     zscore_stats: Dict[str, List[float]] = {}
 
@@ -294,7 +302,11 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
     else:
         transform_params["note"] = "no adaptation applied"
 
-    metrics_after = _compute_stats(Xs, Xt)
+    metrics_after: Dict[str, float] = {}
+    try:
+        metrics_after = _compute_stats(Xs, Xt)
+    except Exception as exc:  # pragma: no cover - diagnostic fallback
+        _LOGGER.warning("failed to compute metrics after adaptation: %s", exc, exc_info=True)
 
     source_features = pd.DataFrame(Xs, columns=src_processed.columns, index=bundle.source.features.index)
     target_features = pd.DataFrame(Xt, columns=tgt_processed.columns, index=bundle.target.features.index)
