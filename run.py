@@ -79,7 +79,13 @@ def main() -> None:
     for path in outputs:
         logger.info("输出: %s", path)
 
-    logger.info("预测结果预览:\n%s", preds.file_df.head().to_string(index=False))
+    if not preds.submission_df.empty:
+        logger.info(
+            "目标文件故障类型预测 (共 %d 个):\n%s",
+            len(preds.submission_df),
+            preds.submission_df.to_string(index=False),
+        )
+    logger.info("文件级预测示例:\n%s", preds.file_df.head().to_string(index=False))
 
 
 def entry_point():  # pragma: no cover
