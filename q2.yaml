@@ -1,0 +1,97 @@
+# ==================== 第二问（源域诊断基线）配置 ====================
+io:
+  # Q1 产物（只读）
+  feature_csv: "/Users/miyagiryota/Documents/数学建模/artifacts/q1/数据集/source_domain_features_simplified.csv"
+  preprocess_params: "artifacts/q1/preprocess_params.json"
+  # Q2 输出（不与 Q1 冲突）
+  out_dir: "artifacts/q2"
+  log_file: "artifacts/q2/train.log"
+  # 仅审计记录：原始数据目录（不直接读取）
+  raw_source_dirs:
+    - "/Users/miyagiryota/Documents/数学建模/数据集/源域数据集"
+  raw_target_dirs:
+    - "/Users/miyagiryota/Documents/数学建模/数据集/目标域数据集"
+
+data:
+  label_col: "fault_type"       # 期望标签集合：{N, OR, IR, B}
+  # 非特征列（与当前简化特征表对齐；保留 sensor 用于过滤）
+  drop_cols: ["uid","file_id","file_path","fault_size","load_level","sensor_src","or_position",
+              "sampling_rate","rpm","channel","window_id","t_start_s","t_end_s",
+              "fault_label","signal_length","signal_key"]
+  # 传感器过滤：如需仅使用某个传感器，可填写 ["DE"] 等；为空表示不过滤
+  sensor_filter: []
+  stratify_by: "label"      # 分层抽样
+  test_size: 0.3
+  val_size: 0.05            # 从训练中再切验证
+  random_seed: 2025
+  # 特征选择策略：若存在 z_ 前缀列则优先使用；否则对原始列做 StandardScaler（仅拟合训练集）
+  prefer_z_features: true
+
+models:
+  candidates:
+    - name: "SVM_RBF"
+      type: "svm"
+      params_grid:
+        C: [0.5, 1, 2, 4, 8]
+        gamma: ["scale", 0.01, 0.05, 0.1]
+        class_weight: ["balanced"]
+    - name: "RandomForest"
+      type: "rf"
+      params_grid:
+        n_estimators: [200, 400, 800]
+        max_depth: [null, 10, 20]
+        min_samples_leaf: [1, 2, 4]
+    - name: "HistGB"
+      type: "hgb"
+      params_grid:
+        learning_rate: [0.05, 0.1]
+        max_depth: [3, 5]
+        max_iter: [200, 400]
+        l2_regularization: [0.0, 0.1]
+    - name: "XGBoost"
+      type: "xgb"
+      params_grid:
+        n_estimators: [400, 800, 1200]
+        max_depth: [4, 6, 8]
+        learning_rate: [0.03, 0.07, 0.1]
+        subsample: [0.8, 1.0]
+        colsample_bytree: [0.8, 1.0]
+    - name: "CatBoost"
+      type: "catboost"
+      params_grid:
+        depth: [6, 8]
+        learning_rate: [0.05]
+        iterations: [400, 600]
+        l2_leaf_reg: [3, 6]
+    - name: "MLP"
+      type: "mlp"
+      params_grid:
+        hidden_layer_sizes: [[128], [256,128]]
+        alpha: [1e-4, 1e-3]
+        batch_size: [128]
+        max_iter: [200]
+  cv:
+    folds: 5
+    scoring: ["accuracy","f1_macro","balanced_accuracy"]  # 主看 f1_macro
+    n_jobs: -1
+
+imbalance:
+  use_class_weight: true     # 类不平衡：优先用 class_weight（如 SVM 'balanced'）
+  sampler:
+    name: "smote"            # 依据训练集分布自适应启用 SMOTE
+    enabled: true
+    threshold: 3.0           # max/min 比例超过该阈值才触发重采样
+    strategy: "auto"
+    min_samples_default: 6   # 样本数达到该值使用标准 k 近邻
+    min_samples_hard: 2      # 低于该值则放弃 SMOTE，避免过拟合
+    max_k_neighbors: 5       # 自适应上限（最终 k = min(max_k, min_count-1)）
+
+calibration:
+  enabled: true
+  method: "isotonic"         # 或 "sigmoid"
+
+export:
+  topk_models: 1
+  save_per_fold: false
+  figure_dpi: 160
+# ==================== 结束 ====================
