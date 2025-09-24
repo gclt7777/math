@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import joblib  # pyright: ignore[reportMissingImports]
@@ -62,16 +62,64 @@ class PredictionBundle:
     uncertain_df: pd.DataFrame
     proba: np.ndarray
     classes: List[str]
+    segment_label_distribution: Dict[str, float] = field(default_factory=dict)
+    file_label_distribution: Dict[str, float] = field(default_factory=dict)
 
 
-def _prepare_model_input(features: pd.DataFrame, model_columns: List[str]) -> pd.DataFrame:
+def _prepare_model_input(
+    features: pd.DataFrame,
+    model_columns: List[str],
+    preprocess_info: Dict[str, object],
+) -> pd.DataFrame:
     df = features.copy()
     missing = [col for col in model_columns if col not in df.columns]
     if missing:
         LOGGER.warning("缺失模型需要的列，将以 0 填充：%s", missing)
         for col in missing:
             df[col] = 0.0
-    df = df[model_columns]
+
+    df = df.reindex(columns=model_columns)
+    df = df.apply(pd.to_numeric, errors="coerce")
+
+    fill_log: Dict[str, float] = {}
+    target_stats = {}
+    fallback_target = {}
+    if isinstance(preprocess_info, dict):
+        target_stats = preprocess_info.get("target_stats", {}) or {}
+        fallback = preprocess_info.get("fallback_fill", {}) or {}
+        if isinstance(fallback, dict):
+            fallback_target = fallback.get("target", {}) or {}
+
+    for col in df.columns:
+        if not df[col].isna().any():
+            continue
+        fill_value = None
+        stats = target_stats.get(col)
+        if isinstance(stats, dict):
+            if "imputed" in stats and stats["imputed"] is not None:
+                fill_value = stats["imputed"]
+            elif "mean" in stats and stats["mean"] is not None:
+                fill_value = stats["mean"]
+        if fill_value is None and col in fallback_target:
+            fill_value = fallback_target[col]
+        if fill_value is None:
+            fill_value = 0.0
+        df[col] = df[col].fillna(float(fill_value))
+        fill_log[col] = float(fill_value)
+
+    if fill_log:
+        keys = list(fill_log)
+        preview = {key: fill_log[key] for key in keys[:10]}
+        if len(keys) > 10:
+            LOGGER.info(
+                "使用预处理统计填充缺失列（前10项展示，共 %d 列）：%s",
+                len(keys),
+                preview,
+            )
+        else:
+            LOGGER.info("使用预处理统计填充缺失列：%s", preview)
+
+    df = df.fillna(0.0)
     return df
 
 
@@ -265,10 +313,25 @@ def _decode_label(raw_label: object, decoder: Dict[object, str]) -> str:
     return _canonical_fault_label(raw_label)
 
 
+def _distribution(series: pd.Series, class_order: List[str]) -> Dict[str, float]:
+    if series.empty:
+        return {}
+    counts = series.value_counts(normalize=True)
+    ordered: Dict[str, float] = {}
+    for label in class_order:
+        ordered[label] = float(counts.get(label, 0.0))
+    extras = {str(label): float(counts[label]) for label in counts.index if label not in ordered}
+    if extras:
+        for key in sorted(extras):
+            ordered[key] = extras[key]
+    return ordered
+
+
 def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBundle:
     model = joblib.load(cfg.io.q2_best_model)
 
-    X_input = _prepare_model_input(alignment.target.features, alignment.model_columns)
+    preprocess_info = alignment.transform_params.get("preprocess", {}) if isinstance(alignment.transform_params, dict) else {}
+    X_input = _prepare_model_input(alignment.target.features, alignment.model_columns, preprocess_info)
     proba, raw_classes = _ensure_probability(model, X_input)
 
     decoder = _build_class_decoder(cfg.io.q2_columns)
@@ -356,6 +419,10 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
     else:
         submission_df = pd.DataFrame(columns=[basename_col, "pred_fault_type"])
 
+    canonical_order = [label for label in ["N", "OR", "IR", "B"] if label in classes]
+    segment_distribution = _distribution(segment_df["pred_top1"], canonical_order)
+    file_distribution = _distribution(file_df["pred_label"], canonical_order) if not file_df.empty else {}
+
     return PredictionBundle(
         segment_df=segment_df,
         file_df=file_df,
@@ -363,5 +430,7 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
         uncertain_df=uncertain_df,
         proba=proba,
         classes=classes,
+        segment_label_distribution=segment_distribution,
+        file_label_distribution=file_distribution,
     )
 

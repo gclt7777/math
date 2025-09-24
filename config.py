@@ -9,6 +9,9 @@ from typing import Dict, List, Optional
 import yaml
 
 
+VALID_AGG_MODES = {"prob_mean", "prob_logmean", "prob_max", "prob_median", "vote"}
+
+
 @dataclass
 class IOConfig:
     """输入输出路径设置。"""
@@ -113,8 +116,10 @@ def load_config(path: str) -> Q3Config:
     # 合法性校验
     if adapt_cfg.method not in {"coral", "mmd", "none", "zscore"}:
         raise ValueError("adapt.method 必须是 coral/mmd/zscore/none 之一")
-    if inference_cfg.agg_mode not in {"prob_mean", "vote"}:
-        raise ValueError("inference.agg_mode 仅支持 prob_mean 或 vote")
+    if inference_cfg.agg_mode not in VALID_AGG_MODES:
+        raise ValueError(
+            "inference.agg_mode 仅支持 prob_mean/prob_logmean/prob_max/prob_median/vote"
+        )
 
     return Q3Config(
         io=io_cfg,

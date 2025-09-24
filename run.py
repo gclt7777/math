@@ -70,6 +70,16 @@ def main() -> None:
 
     preds = predict_segments(alignment, cfg)
     logger.info("文件级预测完成，文件数: %d", len(preds.file_df))
+    if preds.segment_label_distribution:
+        logger.info(
+            "片段级预测分布: %s",
+            {k: round(v, 3) for k, v in preds.segment_label_distribution.items()},
+        )
+    if preds.file_label_distribution:
+        logger.info(
+            "文件级预测分布: %s",
+            {k: round(v, 3) for k, v in preds.file_label_distribution.items()},
+        )
 
     reports = compute_reports(alignment, preds, cfg)
     figures = render_all(alignment, preds, reports, cfg)

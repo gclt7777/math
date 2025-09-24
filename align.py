@@ -145,6 +145,44 @@ def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[floa
     return stats
 
 
+def _missing_ratio(df: pd.DataFrame) -> Dict[str, float]:
+    """统计每列缺失率，仅返回存在缺失值的列。"""
+
+    ratio: Dict[str, float] = {}
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce")
+        missing = float(series.isna().mean())
+        if missing > 0.0:
+            ratio[col] = missing
+    return ratio
+
+
+def _topk(mapping: Dict[str, float], limit: int) -> Dict[str, float]:
+    """按数值从高到低截取前 ``limit`` 个条目。"""
+
+    items = sorted(mapping.items(), key=lambda item: item[1], reverse=True)
+    return {key: float(value) for key, value in items[:limit]}
+
+
+def _high_ratio_zero(df: pd.DataFrame, threshold: float = 0.95) -> Dict[str, float]:
+    """统计零值占比达到阈值的列。"""
+
+    result: Dict[str, float] = {}
+    if df.empty:
+        return result
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce")
+        if series.empty:
+            continue
+        valid = series.dropna()
+        if valid.empty:
+            continue
+        zero_ratio = float(np.isclose(valid, 0.0).mean())
+        if zero_ratio >= threshold:
+            result[col] = zero_ratio
+    return result
+
+
 def _apply_preprocess(
     df: pd.DataFrame, stats: Dict[str, Tuple[float, float]]
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
@@ -269,6 +307,8 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
     target_original_df = tgt_numeric.copy()
 
     preprocess_stats = _extract_preprocess_stats(bundle.preprocess_params)
+    src_missing_ratio = _missing_ratio(src_numeric)
+    tgt_missing_ratio = _missing_ratio(tgt_numeric)
     src_processed = src_numeric.copy()
     tgt_processed = tgt_numeric.copy()
     preprocess_summary: Dict[str, object] = {"type": "none"}
@@ -287,6 +327,22 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
     else:
         preprocess_summary["reason"] = "missing_preprocess_stats"
 
+    if src_missing_ratio or tgt_missing_ratio:
+        missing_payload: Dict[str, Dict[str, float]] = {}
+        if src_missing_ratio:
+            missing_payload["source"] = _topk(src_missing_ratio, 20)
+            _LOGGER.info(
+                "源域特征缺失率 Top5: %s",
+                _topk(src_missing_ratio, 5),
+            )
+        if tgt_missing_ratio:
+            missing_payload["target"] = _topk(tgt_missing_ratio, 20)
+            _LOGGER.info(
+                "目标域特征缺失率 Top5: %s",
+                _topk(tgt_missing_ratio, 5),
+            )
+        preprocess_summary["missing_ratio"] = missing_payload
+
     src_processed, src_fallback = _fill_remaining_na(src_processed, exclude=set(src_applied))
     tgt_processed, tgt_fallback = _fill_remaining_na(tgt_processed, exclude=set(tgt_applied))
     if src_fallback or tgt_fallback:
@@ -296,6 +352,19 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
         if tgt_fallback:
             fallback_info["target"] = tgt_fallback
         preprocess_summary["fallback_fill"] = fallback_info
+
+    src_zero_ratio = _high_ratio_zero(src_processed)
+    tgt_zero_ratio = _high_ratio_zero(tgt_processed)
+    if src_zero_ratio or tgt_zero_ratio:
+        zero_payload: Dict[str, Dict[str, float]] = {}
+        if src_zero_ratio:
+            zero_payload["source"] = _topk(src_zero_ratio, 20)
+        if tgt_zero_ratio:
+            top_target_zero = _topk(tgt_zero_ratio, 5)
+            if top_target_zero:
+                _LOGGER.warning("目标域特征存在大量零值列: %s", top_target_zero)
+            zero_payload["target"] = _topk(tgt_zero_ratio, 20)
+        preprocess_summary["high_zero_ratio"] = zero_payload
 
     align_candidates = [
         col
