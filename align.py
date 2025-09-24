@@ -122,7 +122,9 @@ def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[floa
     return stats
 
 
-def _apply_preprocess(df: pd.DataFrame, stats: Dict[str, Tuple[float, float]]) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
+def _apply_preprocess(
+    df: pd.DataFrame, stats: Dict[str, Tuple[float, float]]
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
     if not stats:
         return df.copy(), {}
 
