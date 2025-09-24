@@ -28,10 +28,25 @@ class AlignmentResult:
 
 
 def _safe_float(value: object) -> Optional[float]:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+    """Convert ``value`` to ``float`` if possible, otherwise return ``None``."""
+
+    if value is None:
         return None
+
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+
+    candidate = value
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+
+    series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
+    result = series.iloc[0]
+    if pd.isna(result):
+        return None
+    return float(result)
 
 
 def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[float, float]]:
