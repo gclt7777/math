@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -37,6 +38,22 @@ class AlignmentResult:
 
         if isinstance(value, (int, float, np.integer, np.floating)):
             return float(value)
+
+        candidate: object = value
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if not candidate:
+                return None
+
+        try:
+            return float(candidate)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
+            result = series.iloc[0]
+            if pd.isna(result):
+                return None
+            return float(result)
+        return float(value)
 
         candidate: object = value
         if isinstance(candidate, str):
@@ -314,16 +331,32 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
         index=bundle.target.features.index,
     )
 
-    return AlignmentResult(
-        source=FeatureData(source_features, bundle.source.meta),
-        target=FeatureData(target_features, bundle.target.meta),
-        target_raw=FeatureData(target_raw_features, bundle.target.meta),
-        target_original=FeatureData(target_original_features, bundle.target.meta),
-        feature_names=bundle.feature_names,
-        model_columns=bundle.model_columns,
-        source_importance=bundle.source_importance,
-        metrics_before=metrics_before,
-        metrics_after=metrics_after,
-        transform_params=transform_params,
-        zscore_stats=zscore_stats,
-    )
+    source_data = FeatureData(source_features, bundle.source.meta)
+    target_data = FeatureData(target_features, bundle.target.meta)
+    target_raw_data = FeatureData(target_raw_features, bundle.target.meta)
+    target_original_data = FeatureData(target_original_features, bundle.target.meta)
+
+    alignment_kwargs = {
+        "source": source_data,
+        "target": target_data,
+        "target_raw": target_raw_data,
+        "target_original": target_original_data,
+        "feature_names": bundle.feature_names,
+        "model_columns": bundle.model_columns,
+        "metrics_before": metrics_before,
+        "metrics_after": metrics_after,
+        "transform_params": transform_params,
+        "zscore_stats": zscore_stats,
+    }
+
+    signature_params = inspect.signature(AlignmentResult).parameters
+    supports_importance = "source_importance" in signature_params
+    if supports_importance:
+        alignment_kwargs["source_importance"] = bundle.source_importance
+
+    result = AlignmentResult(**alignment_kwargs)
+
+    if not supports_importance:
+        setattr(result, "source_importance", bundle.source_importance)
+
+    return result
