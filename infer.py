@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from types import MappingProxyType
+from typing import Dict, List, Mapping, Tuple
 
 import joblib  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
@@ -54,6 +55,26 @@ _ALIAS_TO_CANONICAL: Dict[str, str] = {
 }
 
 
+def _empty_distribution() -> Mapping[str, float]:
+    """Return an immutable empty distribution mapping."""
+
+    return MappingProxyType({})
+
+
+def _freeze_distribution(values: Mapping[str, float] | None) -> Mapping[str, float]:
+    """Create an immutable copy of ``values``.
+
+    ``MappingProxyType`` is used so callers can't accidentally mutate the stored
+    distributions when inspecting them downstream (e.g. in ``run.py`` logs or
+    exporters). Passing ``None`` or an empty mapping yields a shared immutable
+    empty mapping instance.
+    """
+
+    if not values:
+        return MappingProxyType({})
+    return MappingProxyType(dict(values))
+
+
 @dataclass
 class PredictionBundle:
     segment_df: pd.DataFrame
@@ -62,8 +83,8 @@ class PredictionBundle:
     uncertain_df: pd.DataFrame
     proba: np.ndarray
     classes: List[str]
-    segment_label_distribution: Dict[str, float] = field(default_factory=dict)
-    file_label_distribution: Dict[str, float] = field(default_factory=dict)
+    segment_label_distribution: Mapping[str, float] = field(default_factory=_empty_distribution)
+    file_label_distribution: Mapping[str, float] = field(default_factory=_empty_distribution)
 
 
 def _prepare_model_input(
@@ -430,7 +451,7 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
         uncertain_df=uncertain_df,
         proba=proba,
         classes=classes,
-        segment_label_distribution=segment_distribution,
-        file_label_distribution=file_distribution,
+        segment_label_distribution=_freeze_distribution(segment_distribution),
+        file_label_distribution=_freeze_distribution(file_distribution),
     )
 
