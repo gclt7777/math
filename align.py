@@ -17,14 +17,148 @@ class AlignmentResult:
     source: FeatureData
     target: FeatureData
     target_raw: FeatureData
+    target_original: Optional[FeatureData]
     feature_names: List[str]
     model_columns: List[str]
-    source_importance: Optional[pd.DataFrame]
+    target_original: Optional[FeatureData]
     metrics_before: Dict[str, float]
     metrics_after: Dict[str, float]
     transform_params: Dict[str, object]
     zscore_stats: Dict[str, List[float]]
 
+    def _safe_float(value: object) -> Optional[float]:
+        """Convert ``value`` to ``float`` if possible, otherwise return ``None``."""
+
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return float(value)
+
+        candidate: object = value
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+        if not candidate:
+            return None
+
+        try:
+            return float(candidate)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
+            result = series.iloc[0]
+            if pd.isna(result):
+                return None
+            return float(result)
+
+
+def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[float, float]]:
+    """从预处理配置中提取均值与标准差，兼容多种导出格式。"""
+
+    stats: Dict[str, Tuple[float, float]] = {}
+
+    if not isinstance(params, dict):
+        return stats
+
+    def update_from_mapping(mean_map: Dict[str, object], std_map: Dict[str, object]) -> None:
+        common = set(mean_map).intersection(std_map)
+        for key in common:
+            mean_val = _safe_float(mean_map.get(key))
+            std_val = _safe_float(std_map.get(key))
+            if mean_val is None or std_val is None:
+                continue
+            stats[str(key)] = (mean_val, std_val)
+
+    def update_from_lists(columns: List[object], means: List[object], stds: List[object]) -> None:
+        if not (len(columns) == len(means) == len(stds)):
+            return
+        for col, mean, std in zip(columns, means, stds):
+            mean_val = _safe_float(mean)
+            std_val = _safe_float(std)
+            if col is None or mean_val is None or std_val is None:
+                continue
+            stats[str(col)] = (mean_val, std_val)
+
+    def recurse(node: Dict[str, object]) -> None:
+        if not isinstance(node, dict):
+            return
+
+        feature_stats = node.get("feature_stats")
+        if isinstance(feature_stats, dict):
+            for col, val in feature_stats.items():
+                if not isinstance(val, dict):
+                    continue
+                mean_val = _safe_float(val.get("mean") or val.get("mu") or val.get("avg") or val.get("mean_"))
+                std_val = _safe_float(val.get("std") or val.get("sigma") or val.get("std_") or val.get("scale"))
+                if mean_val is None or std_val is None:
+                    continue
+                stats[str(col)] = (mean_val, std_val)
+
+        mean_map = None
+        std_map = None
+        for key in ("mean", "means", "mean_dict"):
+            if isinstance(node.get(key), dict):
+                mean_map = node[key]  # type: ignore[assignment]
+                break
+        for key in ("std", "stds", "std_dict", "scale", "scale_dict"):
+            if isinstance(node.get(key), dict):
+                std_map = node[key]  # type: ignore[assignment]
+                break
+        if isinstance(mean_map, dict) and isinstance(std_map, dict):
+            update_from_mapping(mean_map, std_map)
+
+        columns = None
+        for key in ("feature_names", "columns", "feature_columns", "fields"):
+            if isinstance(node.get(key), list):
+                columns = node[key]  # type: ignore[assignment]
+                break
+        means = None
+        for key in ("mean_", "means", "mean_values", "mean_list"):
+            if isinstance(node.get(key), list):
+                means = node[key]  # type: ignore[assignment]
+                break
+        stds = None
+        for key in ("scale_", "scales", "std_", "std_values", "std_list"):
+            if isinstance(node.get(key), list):
+                stds = node[key]  # type: ignore[assignment]
+                break
+        if columns is not None and means is not None and stds is not None:
+            update_from_lists(columns, means, stds)
+
+        for child_key in ("scaler", "standard_scaler", "zscore", "preprocess", "normalizer"):
+            child = node.get(child_key)
+            if isinstance(child, dict):
+                recurse(child)
+
+        steps = node.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if isinstance(step, dict):
+                    recurse(step.get("params") or step)
+
+    recurse(params)
+    return stats
+
+
+def _apply_preprocess(
+    df: pd.DataFrame, stats: Dict[str, Tuple[float, float]]
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
+    if not stats:
+        return df.copy(), {}
+
+    df_out = df.copy()
+    applied: Dict[str, Dict[str, float]] = {}
+    for col, (mean, std) in stats.items():
+        if col not in df_out.columns:
+            continue
+        mean_val = _safe_float(mean)
+        std_val = _safe_float(std)
+        if mean_val is None or std_val is None:
+            continue
+        if abs(std_val) < 1e-12:
+            std_val = 1.0
+        df_out[col] = (df_out[col] - mean_val) / std_val
+        applied[col] = {"mean": mean_val, "std": std_val}
+    return df_out, applied
 
 def _compute_stats(Xs: np.ndarray, Xt: np.ndarray) -> Dict[str, float]:
     mean_diff = np.linalg.norm(Xs.mean(axis=0) - Xt.mean(axis=0))
@@ -92,14 +226,34 @@ def _zscore_align(Xt: np.ndarray, mu_t: np.ndarray, std_t: np.ndarray, mu_ref: n
 
 
 def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
-    src_df = bundle.source.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    tgt_df = bundle.target.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    src_numeric = bundle.source.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    tgt_numeric = bundle.target.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    Xs = src_df.to_numpy(dtype=float)
-    Xt_orig = tgt_df.to_numpy(dtype=float)
-    Xt = Xt_orig.copy()
+    target_original_df = tgt_numeric.copy()
 
-    metrics_before = _compute_stats(Xs, Xt)
+    preprocess_stats = _extract_preprocess_stats(bundle.preprocess_params)
+    src_processed = src_numeric
+    tgt_processed = tgt_numeric
+    preprocess_summary: Dict[str, object] = {"type": "none"}
+
+    if preprocess_stats:
+        src_processed, src_applied = _apply_preprocess(src_numeric, preprocess_stats)
+        tgt_processed, tgt_applied = _apply_preprocess(tgt_numeric, preprocess_stats)
+        preprocess_summary = {
+            "type": "zscore",
+            "features": sorted({*src_applied.keys(), *tgt_applied.keys()}),
+            "source_stats": src_applied,
+            "target_stats": tgt_applied,
+        }
+    else:
+        src_applied = {}
+        tgt_applied = {}
+
+    Xs = src_processed.to_numpy(dtype=float)
+    Xt_before = tgt_processed.to_numpy(dtype=float)
+    Xt = Xt_before.copy()
+
+    transform_params: Dict[str, object] = {"method": cfg.adapt.method, "preprocess": preprocess_summary}
     transform_params: Dict[str, object] = {"method": cfg.adapt.method}
     zscore_stats: Dict[str, List[float]] = {}
 
@@ -140,14 +294,20 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
 
     metrics_after = _compute_stats(Xs, Xt)
 
-    source_features = pd.DataFrame(Xs, columns=src_df.columns, index=bundle.source.features.index)
-    target_features = pd.DataFrame(Xt, columns=tgt_df.columns, index=bundle.target.features.index)
-    target_raw_features = pd.DataFrame(Xt_orig, columns=tgt_df.columns, index=bundle.target.features.index)
+    source_features = pd.DataFrame(Xs, columns=src_processed.columns, index=bundle.source.features.index)
+    target_features = pd.DataFrame(Xt, columns=tgt_processed.columns, index=bundle.target.features.index)
+    target_raw_features = pd.DataFrame(Xt_before, columns=tgt_processed.columns, index=bundle.target.features.index)
+    target_original_features = pd.DataFrame(
+        target_original_df.to_numpy(dtype=float),
+        columns=target_original_df.columns,
+        index=bundle.target.features.index,
+    )
 
     return AlignmentResult(
         source=FeatureData(source_features, bundle.source.meta),
         target=FeatureData(target_features, bundle.target.meta),
         target_raw=FeatureData(target_raw_features, bundle.target.meta),
+        target_original=FeatureData(target_original_features, bundle.target.meta),
         feature_names=bundle.feature_names,
         model_columns=bundle.model_columns,
         source_importance=bundle.source_importance,
