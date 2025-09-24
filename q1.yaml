@@ -1,0 +1,64 @@
+# Q1 管线配置示例，路径已适配当前数据目录，请按需调整。
+io:
+  source_dirs:
+    # 源域数据目录，支持多个条目。
+    - "/Users/miyagiryota/Documents/数学建模/数据集/源域数据集"
+  target_dirs:
+    # 目标域数据目录。
+    - "/Users/miyagiryota/Documents/数学建模/数据集/目标域数据集"
+  output_dir: "artifacts/q1"        # 特征输出与日志目录。
+  log_file: "artifacts/q1/process.log"  # 运行日志文件。
+
+sampling:
+  fs_target: 32000                   # 统一重采样频率 (Hz)。
+  segment_seconds: 1.0               # 单段长度 (s)。
+  overlap: 0.5                       # 段间重叠率。
+  drop_incomplete_tail: true         # 是否丢弃不足整段的尾部。
+
+preprocess:
+  detrend: true                      # 是否执行线性去趋势。
+  highpass_hz: null                  # 可选高通截止频率，null 表示禁用。
+  bandpass_hz: [1000, 8000]          # 包络解调前的带通范围。
+  auto_band_by_kurtogram: false      # 是否启用谱峭度自动选带。
+
+envelope:
+  window: "hann"                     # 包络谱加窗类型。
+  zero_pad: false                    # 是否零填充以提高频率分辨率。
+  fft_max_hz: 8000                   # 包络谱截取的最高频率。
+
+bearing:
+  n: 9                               # 滚动体数量。
+  d: 0.00794                         # 滚动体直径 (m)。
+  D: 0.03904                         # 节圆直径 (m)。
+  theta_deg: 0                       # 接触角 (度)。
+  rpm_default: 600                   # 未提供转速时的默认值。
+
+selection:
+  sensors: null                      # 可选传感器列表，如 ["DE","FE"]，null 表示不过滤
+  fault_types: null                  # 可选故障类型列表，如 ["B","IR","OR","N"]
+  fault_sizes: null                  # 可选故障尺寸（例如 ["0007","0014"]）
+  load_levels: null                  # 可选载荷等级（例如 ["0","1","2","3"]）
+  or_positions: null                 # 可选 OR 位置（Centered/Opposite/Orthogonal）
+  max_samples_per_label: null        # 每类最大样本数；null 表示不限
+
+features:
+  time_domain:                       # 需要的时域统计量。
+    - rms
+    - std
+    - skew
+    - kurtosis
+    - crest_factor
+    - impulse_factor
+    - margin_factor
+  envelope_harmonics: 5              # 机理频谐波累积阶数。
+  sideband_orders: 2                 # 旁带阶数范围。
+  tol_rule:                          # 特征频容差设定。
+    frac_of_target: 0.05
+    frac_of_fr: 0.2
+    floor_hz: 1.0
+  normalize_features: "zscore"       # 标准化策略，可选 zscore/robust/none。
+
+runtime:
+  n_jobs: 4                          # 并行处理的文件数。
+  random_seed: 2025                  # 随机种子。
+  fail_fast: false                   # 单文件失败是否终止整体流程。
