@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import joblib  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
@@ -175,6 +175,87 @@ def _build_class_decoder(columns_path: str) -> Dict[object, str]:
     return decoder
 
 
+def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
+    if matrix.size == 0:
+        return matrix
+    result = np.clip(np.asarray(matrix, dtype=float, copy=True), 0.0, None)
+    row_sums = result.sum(axis=1, keepdims=True)
+    zero_mask = np.isclose(row_sums, 0.0)
+    valid_rows = ~zero_mask.ravel()
+    if np.any(valid_rows):
+        result[valid_rows] /= row_sums[valid_rows]
+    if np.any(zero_mask):
+        result[zero_mask.ravel()] = 1.0 / result.shape[1]
+    return result
+
+
+def _normalize_vector(vec: np.ndarray) -> np.ndarray:
+    arr = np.clip(np.asarray(vec, dtype=float, copy=True), 0.0, None)
+    total = arr.sum()
+    if total <= 0:
+        if arr.size == 0:
+            return arr
+        return np.full_like(arr, 1.0 / arr.size)
+    return arr / total
+
+
+def _collapse_probabilities(
+    proba: np.ndarray, labels: List[str]
+) -> Tuple[np.ndarray, List[str]]:
+    if proba.ndim != 2 or proba.size == 0:
+        return np.asarray(proba, dtype=float), list(labels)
+
+    aggregates: Dict[str, List[np.ndarray]] = {label: [] for label in KNOWN_FAULT_LABELS}
+    extras: Dict[str, List[np.ndarray]] = {}
+    for idx, raw_label in enumerate(labels):
+        canonical = _canonical_fault_label(raw_label)
+        if canonical in KNOWN_FAULT_LABELS:
+            aggregates[canonical].append(proba[:, idx])
+        else:
+            extras.setdefault(canonical, []).append(proba[:, idx])
+
+    collapsed_cols: List[np.ndarray] = []
+    collapsed_labels: List[str] = []
+    for label in ["N", "OR", "IR", "B"]:
+        if aggregates[label]:
+            stacked = np.vstack(aggregates[label])
+            collapsed_cols.append(stacked.sum(axis=0))
+        else:
+            collapsed_cols.append(np.zeros(proba.shape[0]))
+        collapsed_labels.append(label)
+
+    collapsed = np.vstack(collapsed_cols).T
+    collapsed = _normalize_rows(collapsed)
+
+    if extras:
+        LOGGER.warning("预测中存在非标准类别输出，将忽略: %s", sorted(extras))
+
+    return collapsed, collapsed_labels
+
+
+def _aggregate_probabilities(subset: np.ndarray, mode: str) -> np.ndarray:
+    array = np.asarray(subset, dtype=float)
+    if array.size == 0:
+        return array
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+
+    if mode in {"prob_mean", "vote"}:
+        combined = array.mean(axis=0)
+    elif mode == "prob_logmean":
+        logp = np.log(np.clip(array, 1e-9, 1.0))
+        combined = np.exp(logp.mean(axis=0))
+    elif mode == "prob_max":
+        combined = array.max(axis=0)
+    elif mode == "prob_median":
+        combined = np.median(array, axis=0)
+    else:
+        if mode not in {"prob_mean", "vote"}:
+            LOGGER.warning("未知的聚合方式 %s，默认使用概率均值。", mode)
+        combined = array.mean(axis=0)
+    return _normalize_vector(combined)
+
+
 def _decode_label(raw_label: object, decoder: Dict[object, str]) -> str:
     if raw_label in decoder:
         return decoder[raw_label]
@@ -191,9 +272,10 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
     proba, raw_classes = _ensure_probability(model, X_input)
 
     decoder = _build_class_decoder(cfg.io.q2_columns)
-    classes = [_decode_label(cls, decoder) for cls in raw_classes]
+    decoded_classes = [_decode_label(cls, decoder) for cls in raw_classes]
+    proba, classes = _collapse_probabilities(proba, decoded_classes)
 
-    topk = max(1, cfg.inference.topk)
+    topk = min(max(1, cfg.inference.topk), proba.shape[1])
     top_indices = np.argsort(proba, axis=1)[:, ::-1][:, :topk]
     top_labels = np.array([[classes[idx] for idx in row] for row in top_indices])
     top_probs = np.take_along_axis(proba, top_indices, axis=1)
@@ -214,6 +296,9 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
     meta["is_unknown"] = meta["max_prob"] < cfg.inference.unknown_threshold
     meta["pred_fault_type"] = meta["pred_top1"]
 
+    for idx, label in enumerate(classes):
+        meta[f"prob_{label}"] = proba[:, idx]
+
     segment_df = meta.copy()
 
     basename_col = cfg.data.file_basename_col
@@ -228,13 +313,13 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
     submission_rows: List[Dict[str, object]] = []
 
     for name, group in grouped:
-        probs = np.vstack(group["max_prob"].to_numpy())  # placeholder
-        # 使用概率均值
-        file_probs = proba[group.index].mean(axis=0) if cfg.inference.agg_mode == "prob_mean" else None
+        subset = proba[group.index]
+        file_probs = _aggregate_probabilities(subset, cfg.inference.agg_mode)
+
         if cfg.inference.agg_mode == "vote":
             votes = pd.Series(group["pred_top1"]).value_counts()
             top_label = votes.idxmax()
-            second_label = votes.iloc[1].name if votes.size > 1 else "-"
+            second_label = votes.index[1] if votes.size > 1 else "-"
             top_score = votes.max() / votes.sum()
             second_score = votes.iloc[1] / votes.sum() if votes.size > 1 else 0.0
         else:
@@ -258,6 +343,8 @@ def predict_segments(alignment: AlignmentResult, cfg: Q3Config) -> PredictionBun
             "n_unknown_segments": int(group["is_unknown"].sum()),
             "is_unknown": is_unknown,
         }
+        for cls_idx, label in enumerate(classes):
+            record[f"prob_{label}"] = float(file_probs[cls_idx])
         agg_rows.append(record)
         submission_rows.append({basename_col: name, "pred_fault_type": top_label})
 

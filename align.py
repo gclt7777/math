@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingImports]
@@ -160,11 +160,39 @@ def _apply_preprocess(
         std_val = _safe_float(std)
         if mean_val is None or std_val is None:
             continue
+        series = pd.to_numeric(df_out[col], errors="coerce")
+        had_nan = series.isna().any()
+        if had_nan:
+            series = series.fillna(mean_val)
+        std_val = float(std_val)
         if abs(std_val) < 1e-12:
             std_val = 1.0
-        df_out[col] = (df_out[col] - mean_val) / std_val
-        applied[col] = {"mean": mean_val, "std": std_val}
+        df_out[col] = (series - mean_val) / std_val
+        applied[col] = {"mean": float(mean_val), "std": float(std_val)}
+        if had_nan:
+            applied[col]["imputed"] = float(mean_val)
     return df_out, applied
+
+
+def _fill_remaining_na(
+    df: pd.DataFrame, exclude: Optional[Set[str]] = None
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    df_out = df.copy()
+    filled: Dict[str, float] = {}
+    excluded = exclude or set()
+    for col in df_out.columns:
+        series = pd.to_numeric(df_out[col], errors="coerce")
+        if not series.isna().any():
+            df_out[col] = series.astype(float)
+            continue
+        fill_value = _safe_float(series.mean())
+        if fill_value is None:
+            fill_value = 0.0
+        series = series.fillna(fill_value)
+        df_out[col] = series.astype(float)
+        if col not in excluded:
+            filled[col] = float(fill_value)
+    return df_out, filled
 
 
 def _compute_stats(Xs: np.ndarray, Xt: np.ndarray) -> Dict[str, float]:
@@ -233,19 +261,21 @@ def _zscore_align(Xt: np.ndarray, mu_t: np.ndarray, std_t: np.ndarray, mu_ref: n
 
 
 def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
-    src_numeric = bundle.source.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    tgt_numeric = bundle.target.features.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    src_numeric = bundle.source.features.apply(pd.to_numeric, errors="coerce")
+    tgt_numeric = bundle.target.features.apply(pd.to_numeric, errors="coerce")
 
     target_original_df = tgt_numeric.copy()
 
     preprocess_stats = _extract_preprocess_stats(bundle.preprocess_params)
-    src_processed = src_numeric
-    tgt_processed = tgt_numeric
+    src_processed = src_numeric.copy()
+    tgt_processed = tgt_numeric.copy()
     preprocess_summary: Dict[str, object] = {"type": "none"}
+    src_applied: Dict[str, Dict[str, float]] = {}
+    tgt_applied: Dict[str, Dict[str, float]] = {}
 
     if preprocess_stats:
-        src_processed, src_applied = _apply_preprocess(src_numeric, preprocess_stats)
-        tgt_processed, tgt_applied = _apply_preprocess(tgt_numeric, preprocess_stats)
+        src_processed, src_applied = _apply_preprocess(src_processed, preprocess_stats)
+        tgt_processed, tgt_applied = _apply_preprocess(tgt_processed, preprocess_stats)
         preprocess_summary = {
             "type": "zscore",
             "features": sorted({*src_applied.keys(), *tgt_applied.keys()}),
@@ -253,82 +283,132 @@ def fit_transform(bundle: DataBundle, cfg: Q3Config) -> AlignmentResult:
             "target_stats": tgt_applied,
         }
     else:
-        src_applied = {}
-        tgt_applied = {}
+        preprocess_summary["reason"] = "missing_preprocess_stats"
 
-    Xs = src_processed.to_numpy(dtype=float)
-    Xt_before = tgt_processed.to_numpy(dtype=float)
-    Xt = Xt_before.copy()
+    src_processed, src_fallback = _fill_remaining_na(src_processed, exclude=set(src_applied))
+    tgt_processed, tgt_fallback = _fill_remaining_na(tgt_processed, exclude=set(tgt_applied))
+    if src_fallback or tgt_fallback:
+        fallback_info: Dict[str, Dict[str, float]] = {}
+        if src_fallback:
+            fallback_info["source"] = src_fallback
+        if tgt_fallback:
+            fallback_info["target"] = tgt_fallback
+        preprocess_summary["fallback_fill"] = fallback_info
+
+    align_candidates = [
+        col
+        for col in bundle.feature_names
+        if col in src_processed.columns and col in tgt_processed.columns
+    ]
+    if not align_candidates:
+        align_candidates = [
+            col
+            for col in bundle.model_columns
+            if col in src_processed.columns and col in tgt_processed.columns
+        ]
+    align_candidates = list(dict.fromkeys(align_candidates))
+
+    transform_params: Dict[str, object] = {
+        "method": cfg.adapt.method,
+        "apply_to": cfg.adapt.apply_to,
+        "fit_on": cfg.adapt.fit_on,
+        "preprocess": preprocess_summary,
+        "align_columns": align_candidates,
+        "model_columns": bundle.model_columns,
+    }
+    zscore_stats: Dict[str, List[float]] = {}
+    tgt_before_adapt = tgt_processed.copy()
 
     metrics_before: Dict[str, float] = {}
-    try:
-        metrics_before = _compute_stats(Xs, Xt)
-    except Exception as exc:  # pragma: no cover - diagnostic fallback
-        _LOGGER.warning("failed to compute metrics before adaptation: %s", exc, exc_info=True)
-    transform_params: Dict[str, object] = {"method": cfg.adapt.method, "preprocess": preprocess_summary}
-    zscore_stats: Dict[str, List[float]] = {}
-
-    if cfg.adapt.method == "coral":
-        ref = Xs if cfg.adapt.fit_on in {"source", "source+target"} else Xt
-        if cfg.adapt.fit_on == "source+target":
-            ref = np.vstack([Xs, Xt])
-        mu_s = ref.mean(axis=0)
-        cov_s = np.cov(ref, rowvar=False)
-        Xt_aligned, params = _coral(Xt, mu_s, cov_s, cfg.adapt.coral_eps)
-        transform_params.update(params)
-        if cfg.adapt.apply_to == "target":
-            Xt = Xt_aligned
-        elif cfg.adapt.apply_to == "both":
-            Xs, Xt = Xt_aligned, Xt_aligned
-        else:
-            zscore_stats = params  # 兼容结构
-    elif cfg.adapt.method == "zscore":
-        ref = Xs if cfg.adapt.fit_on in {"source", "source+target"} else Xt
-        if cfg.adapt.fit_on == "source+target":
-            ref = np.vstack([Xs, Xt])
-        mu_ref = ref.mean(axis=0)
-        std_ref = ref.std(axis=0)
-        mu_t = Xt.mean(axis=0)
-        std_t = Xt.std(axis=0)
-        Xt_aligned, stats = _zscore_align(Xt, mu_t, std_t, mu_ref, std_ref)
-        transform_params.update(stats)
-        zscore_stats = stats
-        if cfg.adapt.apply_to in {"target", "both"}:
-            Xt = Xt_aligned
-        if cfg.adapt.apply_to == "both":
-            Xs = _zscore_align(Xs, Xs.mean(axis=0), Xs.std(axis=0), mu_ref, std_ref)[0]
-    elif cfg.adapt.method == "mmd":
-        transform_params["gamma"] = cfg.adapt.mmd_gamma
-        # 无显式变换，仅记录参数
-    else:
-        transform_params["note"] = "no adaptation applied"
-
     metrics_after: Dict[str, float] = {}
-    try:
-        metrics_after = _compute_stats(Xs, Xt)
-    except Exception as exc:  # pragma: no cover - diagnostic fallback
-        _LOGGER.warning("failed to compute metrics after adaptation: %s", exc, exc_info=True)
 
-    source_features = pd.DataFrame(Xs, columns=src_processed.columns, index=bundle.source.features.index)
-    target_features = pd.DataFrame(Xt, columns=tgt_processed.columns, index=bundle.target.features.index)
-    target_raw_features = pd.DataFrame(Xt_before, columns=tgt_processed.columns, index=bundle.target.features.index)
-    target_original_features = pd.DataFrame(
-        target_original_df.to_numpy(dtype=float),
-        columns=target_original_df.columns,
-        index=bundle.target.features.index,
-    )
+    if align_candidates:
+        Xs_align = src_processed[align_candidates].to_numpy(dtype=float, copy=True)
+        Xt_align = tgt_processed[align_candidates].to_numpy(dtype=float, copy=True)
+
+        try:
+            metrics_before = _compute_stats(Xs_align, Xt_align)
+        except Exception as exc:  # pragma: no cover - diagnostic fallback
+            _LOGGER.warning(
+                "failed to compute metrics before adaptation: %s", exc, exc_info=True
+            )
+
+        Xs_eval = Xs_align
+        Xt_eval = Xt_align
+
+        if cfg.adapt.method == "coral":
+            ref = Xs_align if cfg.adapt.fit_on in {"source", "source+target"} else Xt_align
+            if cfg.adapt.fit_on == "source+target":
+                ref = np.vstack([Xs_align, Xt_align])
+            mu_ref = ref.mean(axis=0)
+            cov_ref = np.cov(ref, rowvar=False)
+            Xt_new, params = _coral(Xt_align, mu_ref, cov_ref, cfg.adapt.coral_eps)
+            transform_params.update(params)
+            if cfg.adapt.apply_to in {"target", "both"}:
+                Xt_eval = Xt_new
+            if cfg.adapt.apply_to in {"source", "both"}:
+                Xs_eval, _ = _coral(Xs_align, mu_ref, cov_ref, cfg.adapt.coral_eps)
+        elif cfg.adapt.method == "zscore":
+            ref = Xs_align if cfg.adapt.fit_on in {"source", "source+target"} else Xt_align
+            if cfg.adapt.fit_on == "source+target":
+                ref = np.vstack([Xs_align, Xt_align])
+            mu_ref = ref.mean(axis=0)
+            std_ref = ref.std(axis=0)
+            mu_t = Xt_align.mean(axis=0)
+            std_t = Xt_align.std(axis=0)
+            Xt_new, stats = _zscore_align(Xt_align, mu_t, std_t, mu_ref, std_ref)
+            transform_params.update(stats)
+            zscore_stats = stats
+            if cfg.adapt.apply_to in {"target", "both"}:
+                Xt_eval = Xt_new
+            if cfg.adapt.apply_to in {"source", "both"}:
+                Xs_eval, _ = _zscore_align(
+                    Xs_align,
+                    Xs_align.mean(axis=0),
+                    Xs_align.std(axis=0),
+                    mu_ref,
+                    std_ref,
+                )
+        elif cfg.adapt.method == "mmd":
+            transform_params["gamma"] = cfg.adapt.mmd_gamma
+        else:
+            transform_params["note"] = "no adaptation applied"
+
+        src_processed.loc[:, align_candidates] = Xs_eval
+        tgt_processed.loc[:, align_candidates] = Xt_eval
+
+        try:
+            metrics_after = _compute_stats(Xs_eval, Xt_eval)
+        except Exception as exc:  # pragma: no cover - diagnostic fallback
+            _LOGGER.warning(
+                "failed to compute metrics after adaptation: %s", exc, exc_info=True
+            )
+    else:
+        _LOGGER.warning("未找到可用于对齐的公共特征列，将跳过域适配。")
+
+    source_features = src_processed.reindex(columns=bundle.model_columns, copy=True)
+    target_features = tgt_processed.reindex(columns=bundle.model_columns, copy=True)
+    target_raw_features = tgt_before_adapt.reindex(columns=bundle.model_columns, copy=True)
+    target_original_features = target_original_df.reindex(columns=bundle.model_columns, copy=True)
 
     source_data = FeatureData(source_features, bundle.source.meta)
     target_data = FeatureData(target_features, bundle.target.meta)
     target_raw_data = FeatureData(target_raw_features, bundle.target.meta)
     target_original_data = FeatureData(target_original_features, bundle.target.meta)
 
+    candidate_names = align_candidates or bundle.feature_names
+    effective_feature_names = [
+        col for col in candidate_names if col in target_features.columns
+    ]
+    if not effective_feature_names:
+        effective_feature_names = list(target_features.columns)
+
     alignment_kwargs = {
         "source": source_data,
         "target": target_data,
         "target_raw": target_raw_data,
         "target_original": target_original_data,
-        "feature_names": bundle.feature_names,
+        "feature_names": effective_feature_names,
         "model_columns": bundle.model_columns,
         "metrics_before": metrics_before,
         "metrics_after": metrics_after,

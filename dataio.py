@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -10,6 +11,9 @@ from typing import Dict, List, Optional
 import pandas as pd  # pyright: ignore[reportMissingImports]
 
 from .config import Q3Config
+
+
+_LOGGER = logging.getLogger("q3_transfer")
 
 
 @dataclass
@@ -139,8 +143,15 @@ def load_all(cfg: Q3Config) -> DataBundle:
     src_meta = df_src[meta_cols].copy()
     tgt_meta = df_tgt[[col for col in meta_cols if col in df_tgt.columns]].copy()
 
-    src_features = df_src[feature_cols].copy()
-    tgt_features = df_tgt[feature_cols].copy()
+    missing_src = [col for col in model_columns if col not in df_src.columns]
+    missing_tgt = [col for col in model_columns if col not in df_tgt.columns]
+    if missing_src:
+        _LOGGER.warning("源域缺失模型特征列，将以 NaN 占位: %s", missing_src)
+    if missing_tgt:
+        _LOGGER.warning("目标域缺失模型特征列，将以 NaN 占位: %s", missing_tgt)
+
+    src_features = df_src.reindex(columns=model_columns, copy=True)
+    tgt_features = df_tgt.reindex(columns=model_columns, copy=True)
 
     preprocess_params = _load_json(cfg.io.preprocess_params)
 
