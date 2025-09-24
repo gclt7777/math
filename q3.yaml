@@ -1,0 +1,61 @@
+# Q3 无监督迁移配置示例
+io:
+  src_feature_csv: "/Users/miyagiryota/Documents/数学建模/artifacts/q1/数据集/source_domain_features_simplified.csv"
+  tgt_feature_csv: "/Users/miyagiryota/Documents/数学建模/artifacts/q1/数据集/target_domain_features_simplified.csv"
+  preprocess_params: "artifacts/q1/preprocess_params.json"
+  q2_best_model: "artifacts/q2/best_model.joblib"
+  q2_columns: "artifacts/q2/columns.json"
+  q2_importance: "artifacts/q2/feature_importance.csv"
+  out_dir: "artifacts/q3"
+  log_file: "artifacts/q3/transfer.log"
+
+data:
+  label_col: "fault_type"
+  uid_col: "uid"
+  file_basename_col: "file_id"
+  sensor_filter: []
+  prefer_z_features: true
+  drop_cols: [
+    "fault_size",
+    "load_level",
+    "sensor_src",
+    "sampling_rate",
+    "rpm",
+    "channel",
+    "window_id",
+    "t_start_s",
+    "t_end_s",
+    "fault_label",
+    "signal_length",
+    "signal_key",
+    "domain"
+  ]
+
+adapt:
+  method: "zscore"
+  coral_eps: 1e-6
+  mmd_kernel: "rbf"
+  mmd_gamma: 0.5
+  fit_on: "source"
+  apply_to: "target"
+
+inference:
+  agg_mode: "prob_mean"
+  unknown_threshold: 0.55
+  topk: 2
+
+viz:
+  use_umap: true
+  figure_dpi: 160
+  chinese_font: null
+
+interpret:
+  use_source_importance: true
+  use_shap: false
+  shap_sample: 2000
+  mech_features_prefix: ["BPFI", "BPFO", "BSF"]
+
+export:
+  save_tables: true
+  save_figures: true
+  html_report: true
