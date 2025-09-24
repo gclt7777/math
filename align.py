@@ -36,17 +36,20 @@ def _safe_float(value: object) -> Optional[float]:
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(value)
 
-    candidate = value
-    if isinstance(value, str):
-        candidate = value.strip()
+    candidate: object = value
+    if isinstance(candidate, str):
+        candidate = candidate.strip()
         if not candidate:
             return None
 
-    series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
-    result = series.iloc[0]
-    if pd.isna(result):
-        return None
-    return float(result)
+    try:
+        return float(candidate)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        series = pd.to_numeric(pd.Series([candidate]), errors="coerce")
+        result = series.iloc[0]
+        if pd.isna(result):
+            return None
+        return float(result)
 
 
 def _extract_preprocess_stats(params: Dict[str, object]) -> Dict[str, Tuple[float, float]]:
