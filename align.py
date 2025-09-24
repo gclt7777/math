@@ -185,9 +185,11 @@ def _fill_remaining_na(
         if not series.isna().any():
             df_out[col] = series.astype(float)
             continue
-        fill_value = _safe_float(series.mean())
-        if fill_value is None:
+        mean_val = series.mean(skipna=True)
+        if pd.isna(mean_val):
             fill_value = 0.0
+        else:
+            fill_value = float(mean_val)
         series = series.fillna(fill_value)
         df_out[col] = series.astype(float)
         if col not in excluded:
