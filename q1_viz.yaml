@@ -1,0 +1,48 @@
+# Q1 可视化配置示例
+base_q1_config: "config/q1.yaml"
+
+io:
+  source_dirs:
+    - "/Users/miyagiryota/Documents/数学建模/数据集/源域数据集"
+  target_dirs:
+    - "/Users/miyagiryota/Documents/数学建模/数据集/目标域数据集"
+  features_csv: "artifacts/q1/features_source.csv"
+  out_dir: "artifacts/q1/viz"
+  log_file: "artifacts/q1/viz.log"
+
+selection:
+  random_seed: 2025
+  prefer_sensor: ["DE", "FE", "BA"]
+  sample_per_label: 1
+  sample_files: {}
+  ir_for_tfspec: true
+
+plots:
+  time_waveform: true
+  fft_0_1000: true
+  char_freq_marks: true
+  spectrogram_ir: true
+  envelope_ir: true
+  features_dist: true
+  corr_matrix: true
+
+fft:
+  max_hz: 1000
+  nfft: 4096
+  window: "hann"
+
+spec:
+  nperseg: 2048
+  noverlap: 1024
+  max_hz: 4000
+
+envelope:
+  window: null
+  zero_pad: null
+  fft_max_hz: 8000
+
+feature_viz:
+  use_z_pref: true
+  time_feats: ["td_rms", "td_kurtosis", "td_crest_factor", "td_peak"]
+  mech_energy_keys: ["BPFI", "BPFO", "BSF", "FTF"]
+  figure_dpi: 160
