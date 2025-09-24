@@ -57,7 +57,10 @@ def render_all(result: AlignmentResult, preds: PredictionBundle, reports: Report
 
 
 def _plot_target_overview(result: AlignmentResult, cfg: Q3Config) -> Optional[FigureRecord]:
-    df = result.target_raw.features.copy()
+    if result.target_original is not None:
+        df = result.target_original.features.copy()
+    else:
+        df = result.target_raw.features.copy()
     meta = result.target.meta
     if df.empty:
         return None
